@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_zh-CN.md)
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/nanhongchuan/Liqun-Translate)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/nanhongchuan/Civi-Translate)
 
 Civi Translate is a local-first realtime interpreting web app. It captures microphone audio in the browser, streams it to a local FastAPI service for ASR, then sends stable text segments through a user-configured OpenAI-compatible LLM endpoint for translation.
 

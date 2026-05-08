@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_zh-CN.md)
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/nanhongchuan/Liqun-Translate)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/nanhongchuan/Civi-Translate)
 
 Civi Translate 是一个本地优先的实时同传 Web 应用。它在浏览器中采集麦克风音频，通过本机 FastAPI 服务完成语音识别（ASR），再将稳定的文本片段发送到用户配置的 OpenAI 兼容 LLM 端点进行翻译。
 
