@@ -100,6 +100,7 @@ export function SessionTextPanel({
 
   const copyLabel = role === "source" ? "原文" : "译文";
   const hasDraftView = role === "translation" && Boolean(draftText?.trim());
+  const showLiveIndicator = isLive && !errorText;
   const ariaStream =
     role === "source"
       ? (expanded
@@ -112,7 +113,27 @@ export function SessionTextPanel({
   return (
     <article className="relative rounded-2xl border border-slate-200/80 bg-white/90 p-5 pb-12 shadow-soft backdrop-blur-sm md:p-6 md:pb-12">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <h2 className="text-sm font-semibold text-slate-800">{title}</h2>
+        <div className="flex min-w-0 items-center gap-2">
+          <h2 className="truncate text-sm font-semibold text-slate-800">{title}</h2>
+          {showLiveIndicator ? (
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-semibold ${
+                role === "source"
+                  ? "bg-violet-50 text-violet-700 ring-1 ring-violet-100"
+                  : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
+              }`}
+              aria-label={role === "source" ? "正在实时转写" : "正在实时翻译"}
+              title={role === "source" ? "正在实时转写" : "正在实时翻译"}
+            >
+              <span className="live-status-dot h-1.5 w-1.5 rounded-full bg-current" aria-hidden />
+              <span className="flex h-3 items-end gap-0.5" aria-hidden>
+                <span className="live-status-bar h-1.5" />
+                <span className="live-status-bar h-3 [animation-delay:120ms]" />
+                <span className="live-status-bar h-2 [animation-delay:240ms]" />
+              </span>
+            </span>
+          ) : null}
+        </div>
         <div className="flex items-center gap-1.5">
           <button
             type="button"

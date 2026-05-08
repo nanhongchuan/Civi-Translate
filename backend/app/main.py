@@ -1,27 +1,67 @@
 """Local FastAPI entrypoint: BFF, ASR orchestration, and LLM proxy (M0: health only)."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import os
 import queue
+import shutil
+import subprocess
+import sys
 import threading
 import time
+import uuid
 from typing import Any, AsyncIterator, Dict, Iterable, Iterator, List, Optional
 
 import requests
 from requests import exceptions as req_exc
 
+from app import asr_online_settings
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.asr_service import is_asr_importable, transcribe_int16_16k_mono
+from app.asr_service import (
+    get_asr_engine,
+    get_asr_import_error,
+    get_asr_model_name,
+    is_asr_importable,
+    reset_asr_model_cache,
+    transcribe_int16_16k_mono,
+)
 from app.llm_settings import key_tail_for_display, load_raw, save_raw
+from app.online_asr_service import wav_bytes_from_pcm16_16k_mono
 
 _API_PREFIX = "/api"
 
 _LLM_TEST_UA = "realtime-translate/0.1 (llm-test)"
+_ASR_SAMPLE_RATE = 16000
+_ASR_BYTES_PER_SAMPLE = 2
+_ASR_MIN_TRANSCRIBE_SEC = 0.72
+_ASR_PARTIAL_INTERVAL_SEC = 0.65
+_ASR_ENDPOINT_SILENCE_SEC = 0.55
+_ASR_MAX_SEGMENT_SEC = 4.8
+_ASR_RMS_SPEECH_THRESHOLD = 450.0
+_ASR_INSTALL_JOBS: Dict[str, Dict[str, Any]] = {}
+_ASR_INSTALL_LOCK = threading.Lock()
+_LLM_REQUEST_LOCK = threading.Lock()
+_LLM_LAST_REQUEST_AT = 0.0
+_PARAKEET_MODEL_ID = "parakeet-tdt-0.6b-v2"
+_WHISPER_MODEL_ID = "faster-whisper-medium"
+_ONLINE_ASR_MODEL_ID = "online-asr-api"
+_PARAKEET_VENV_DIR = ".venv-parakeet"
+_PARAKEET_PYTHON_VERSION = "3.12.12"
+_DEFAULT_TRANSLATION_SYSTEM_PROMPT = (
+    "You are a live interpreter. Translate the user text. "
+    "The answer language must be ONLY the target language, including single words, "
+    "fragments, and numbers written as that language would normally write them, "
+    "not left in the source. "
+    "If the user text is already in the target language, return it with minimal edits. "
+    "No headings, no quotes around the result, no explanations, no markdown. "
+    "Output plain translated text only."
+)
 
 
 def _llm_env_float(name: str, default: float) -> float:
@@ -42,6 +82,30 @@ def _requests_timeout_connect_read(*, stream: bool) -> tuple[float, float]:
         return (connect, read_gap)
     read_total = _llm_env_float("RT_LLM_READ_TIMEOUT", 300.0)
     return (connect, read_total)
+
+
+def _llm_min_request_interval() -> float:
+    raw = os.getenv("RT_LLM_MIN_REQUEST_INTERVAL", "").strip()
+    if not raw:
+        return 0.35
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 2.0
+
+
+def _pace_llm_request() -> None:
+    global _LLM_LAST_REQUEST_AT
+    interval = _llm_min_request_interval()
+    if interval <= 0:
+        return
+    with _LLM_REQUEST_LOCK:
+        now = time.monotonic()
+        wait = interval - (now - _LLM_LAST_REQUEST_AT)
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _LLM_LAST_REQUEST_AT = now
 
 
 def _llm_verify_tls() -> bool:
@@ -110,6 +174,37 @@ def _log_translate_failure(status_code: int, detail: str, model: str, text: str)
     )
 
 
+def _pcm16_duration_sec(pcm: bytes | bytearray) -> float:
+    return len(pcm) / float(_ASR_SAMPLE_RATE * _ASR_BYTES_PER_SAMPLE)
+
+
+def _pcm16_rms(pcm: bytes | bytearray) -> float:
+    if len(pcm) < _ASR_BYTES_PER_SAMPLE:
+        return 0.0
+    sample_count = len(pcm) // _ASR_BYTES_PER_SAMPLE
+    if sample_count <= 0:
+        return 0.0
+    # Fast enough for 40ms frames, avoids adding numpy to the hot websocket path.
+    total = 0.0
+    usable = sample_count * _ASR_BYTES_PER_SAMPLE
+    for i in range(0, usable, _ASR_BYTES_PER_SAMPLE):
+        sample = int.from_bytes(pcm[i : i + 2], "little", signed=True)
+        total += sample * sample
+    return (total / sample_count) ** 0.5
+
+
+def _asr_text_changed(prev: str, current: str) -> bool:
+    p = prev.strip()
+    c = current.strip()
+    if not c:
+        return False
+    if c == p:
+        return False
+    if p and c.startswith(p) and len(c) - len(p) < 3:
+        return False
+    return True
+
+
 app = FastAPI(title="Realtime Translate API", version="0.1.0")
 
 _origins_env = os.getenv("CORS_ORIGINS", "").strip()
@@ -137,12 +232,429 @@ app.add_middleware(
 
 
 def _asr_status() -> Dict[str, Any]:
-    if not is_asr_importable():
-        return {"available": False, "import_error": "faster-whisper not installed"}
+    engine = get_asr_engine()
+    import_error = get_asr_import_error()
+    if import_error:
+        return {
+            "available": False,
+            "engine": engine,
+            "model": get_asr_model_name(),
+            "import_error": import_error,
+        }
     return {
         "available": True,
-        "model": (os.getenv("RT_ASR_MODEL", "base") or "base").strip() or "base",
+        "engine": engine,
+        "model": get_asr_model_name(),
     }
+
+
+def _asr_import_error_for_engine(engine: str) -> str:
+    if engine == "online_api":
+        return _online_asr_config_error()
+    if engine == "parakeet":
+        return _parakeet_venv_import_error()
+    if engine == "faster_whisper":
+        return _whisper_import_error()
+    return f"unsupported engine {engine!r}"
+
+
+def _asr_runtime_import_error_for_engine(engine: str) -> str:
+    if engine == "online_api":
+        return _online_asr_config_error()
+    if engine == "parakeet":
+        venv_error = _parakeet_venv_import_error()
+        if venv_error:
+            return venv_error
+    try:
+        if engine == "parakeet":
+            import nemo.collections.asr as nemo_asr  # noqa: F401
+        elif engine == "faster_whisper":
+            import faster_whisper  # noqa: F401
+        else:
+            return f"unsupported engine {engine!r}"
+    except ImportError as exc:
+        return str(exc)
+    return ""
+
+
+def _online_asr_config_error() -> str:
+    raw = asr_online_settings.load_raw()
+    base_url = (raw.get("base_url") or "").strip()
+    model = (raw.get("model") or "").strip()
+    api_key = (raw.get("api_key") or "").strip()
+    if not base_url or not model or not api_key:
+        return "请先保存在线转写 API 配置。"
+    if not base_url.startswith(("http://", "https://")):
+        return "在线转写 Base URL 须以 http:// 或 https:// 开头。"
+    return ""
+
+
+def _project_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+
+
+def _parakeet_venv_python() -> str:
+    return os.path.join(_project_root(), _PARAKEET_VENV_DIR, "bin", "python")
+
+
+def _parakeet_venv_import_error() -> str:
+    py = _parakeet_venv_python()
+    if not os.path.exists(py):
+        return "未安装 NVIDIA NeMo"
+    try:
+        proc = subprocess.run(
+            [py, "-c", "import nemo.collections.asr"],
+            cwd=_project_root(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=180,
+            check=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return str(exc)[:500]
+    if proc.returncode == 0:
+        return ""
+    return (proc.stdout or "").strip()[-1000:] or f"python exited with {proc.returncode}"
+
+
+def _python_import_error(python_bin: str, module: str) -> str:
+    try:
+        proc = subprocess.run(
+            [python_bin, "-c", f"import {module}"],
+            cwd=_project_root(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=180,
+            check=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return str(exc)[:500]
+    if proc.returncode == 0:
+        return ""
+    return (proc.stdout or "").strip()[-1000:] or f"python exited with {proc.returncode}"
+
+
+def _whisper_import_error() -> str:
+    return _python_import_error(sys.executable, "faster_whisper")
+
+
+def _asr_model_status() -> list[dict[str, Any]]:
+    parakeet_error = _asr_import_error_for_engine("parakeet")
+    whisper_error = _asr_import_error_for_engine("faster_whisper")
+    online_error = _asr_import_error_for_engine("online_api")
+    online_raw = asr_online_settings.load_raw()
+    online_model = (online_raw.get("model") or "").strip() or "未配置"
+    with _ASR_INSTALL_LOCK:
+        parakeet_job = dict(_ASR_INSTALL_JOBS.get(_PARAKEET_MODEL_ID, {}))
+        whisper_job = dict(_ASR_INSTALL_JOBS.get(_WHISPER_MODEL_ID, {}))
+    return [
+        {
+            "id": _PARAKEET_MODEL_ID,
+            "engine": "parakeet",
+            "name": "NVIDIA Parakeet · TDT 0.6B v2",
+            "model": "nvidia/parakeet-tdt-0.6b-v2",
+            "installed": not parakeet_error,
+            "installing": parakeet_job.get("status") == "running",
+            "status": parakeet_job.get("status") or ("installed" if not parakeet_error else "not_installed"),
+            "message": parakeet_job.get("message") or ("" if not parakeet_error else "未安装 NVIDIA NeMo"),
+            "error": parakeet_job.get("error") or "",
+        },
+        {
+            "id": _WHISPER_MODEL_ID,
+            "engine": "faster_whisper",
+            "name": "faster-whisper · medium",
+            "model": "medium",
+            "installed": not whisper_error,
+            "installing": whisper_job.get("status") == "running",
+            "status": whisper_job.get("status") or ("installed" if not whisper_error else "not_installed"),
+            "message": whisper_job.get("message") or ("" if not whisper_error else "未安装 faster-whisper"),
+            "error": whisper_job.get("error") or whisper_error,
+        },
+        {
+            "id": _ONLINE_ASR_MODEL_ID,
+            "engine": "online_api",
+            "name": "在线转写 API",
+            "model": online_model,
+            "installed": not online_error,
+            "installing": False,
+            "status": "configured" if not online_error else "not_configured",
+            "message": "" if not online_error else online_error,
+            "error": online_error,
+        },
+    ]
+
+
+def _run_asr_install_job(model_id: str) -> None:
+    if model_id == _WHISPER_MODEL_ID:
+        with _ASR_INSTALL_LOCK:
+            _ASR_INSTALL_JOBS[model_id] = {
+                "status": "running",
+                "message": "正在安装 faster-whisper。",
+                "error": "",
+            }
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "-r",
+                    os.path.join(_project_root(), "backend", "requirements.txt"),
+                ],
+                cwd=_project_root(),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=1800,
+                check=False,
+            )
+            if proc.returncode != 0:
+                with _ASR_INSTALL_LOCK:
+                    _ASR_INSTALL_JOBS[model_id] = {
+                        "status": "failed",
+                        "message": "faster-whisper 安装失败。",
+                        "error": (proc.stdout or "").strip()[-1200:] or f"pip exited with {proc.returncode}",
+                    }
+                return
+            with _ASR_INSTALL_LOCK:
+                _ASR_INSTALL_JOBS[model_id] = {
+                    "status": "succeeded",
+                    "message": "faster-whisper 已安装。",
+                    "error": "",
+                }
+        except subprocess.TimeoutExpired:
+            with _ASR_INSTALL_LOCK:
+                _ASR_INSTALL_JOBS[model_id] = {
+                    "status": "failed",
+                    "message": "faster-whisper 安装超时。",
+                    "error": "安装超过 30 分钟仍未结束。",
+                }
+        except Exception as exc:  # noqa: BLE001
+            with _ASR_INSTALL_LOCK:
+                _ASR_INSTALL_JOBS[model_id] = {
+                    "status": "failed",
+                    "message": "faster-whisper 安装异常。",
+                    "error": str(exc)[:1200],
+                }
+        return
+    if model_id != _PARAKEET_MODEL_ID:
+        return
+    uv = shutil.which("uv")
+    with _ASR_INSTALL_LOCK:
+        _ASR_INSTALL_JOBS[model_id] = {
+            "status": "running",
+            "message": "正在创建 Python 3.12 环境并安装 Parakeet 依赖，首次安装可能需要几分钟。",
+            "error": "",
+        }
+    if not uv:
+        with _ASR_INSTALL_LOCK:
+            _ASR_INSTALL_JOBS[model_id] = {
+                "status": "failed",
+                "message": "Parakeet 安装失败。",
+                "error": "未找到 uv。请先安装 uv，或手动创建 Python 3.12 环境后安装 requirements-parakeet.txt。",
+            }
+        return
+    try:
+        root = _project_root()
+        steps = [
+            [uv, "venv", _PARAKEET_VENV_DIR, "--python", _PARAKEET_PYTHON_VERSION],
+            [
+                uv,
+                "pip",
+                "install",
+                "--python",
+                _parakeet_venv_python(),
+                "-r",
+                os.path.join("backend", "requirements.txt"),
+                "-r",
+                os.path.join("backend", "requirements-parakeet.txt"),
+            ],
+            [_parakeet_venv_python(), "-c", "import nemo.collections.asr"],
+        ]
+        outputs: list[str] = []
+        for cmd in steps:
+            proc = subprocess.run(
+                cmd,
+                cwd=root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=1800,
+                check=False,
+            )
+            outputs.append(f"$ {' '.join(cmd)}\n{proc.stdout or ''}")
+            if proc.returncode != 0:
+                output = "\n\n".join(outputs).strip()
+                with _ASR_INSTALL_LOCK:
+                    _ASR_INSTALL_JOBS[model_id] = {
+                        "status": "failed",
+                        "message": "Parakeet 安装失败。",
+                        "error": output[-1200:] or f"install step exited with {proc.returncode}",
+                    }
+                return
+        proc = subprocess.run(
+            [_parakeet_venv_python(), "-c", "import sys; print(sys.version.split()[0])"],
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+            check=False,
+        )
+        with _ASR_INSTALL_LOCK:
+            _ASR_INSTALL_JOBS[model_id] = {
+                "status": "succeeded",
+                "message": "Parakeet 已安装。重启软件后即可启用。",
+                "error": "",
+            }
+    except subprocess.TimeoutExpired:
+        with _ASR_INSTALL_LOCK:
+            _ASR_INSTALL_JOBS[model_id] = {
+                "status": "failed",
+                "message": "Parakeet 安装超时。",
+                "error": "安装超过 30 分钟仍未结束，请在终端手动运行 npm run api:install:parakeet 查看完整输出。",
+            }
+    except Exception as exc:  # noqa: BLE001
+        with _ASR_INSTALL_LOCK:
+            _ASR_INSTALL_JOBS[model_id] = {
+                "status": "failed",
+                "message": "Parakeet 安装异常。",
+                "error": str(exc)[:1200],
+            }
+
+
+@app.get(f"{_API_PREFIX}/asr/models")
+def get_asr_models() -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "current": _asr_status(),
+        "models": _asr_model_status(),
+    }
+
+
+@app.post(f"{_API_PREFIX}/asr/models/{{model_id}}/install")
+def install_asr_model(model_id: str) -> Dict[str, Any]:
+    if model_id not in (_PARAKEET_MODEL_ID, _WHISPER_MODEL_ID):
+        raise HTTPException(status_code=404, detail="未知 ASR 模型。")
+    if model_id == _WHISPER_MODEL_ID:
+        if not _asr_import_error_for_engine("faster_whisper"):
+            with _ASR_INSTALL_LOCK:
+                _ASR_INSTALL_JOBS[model_id] = {
+                    "status": "succeeded",
+                    "message": "faster-whisper 已安装。",
+                    "error": "",
+                }
+            return {"ok": True, "status": "installed", "message": "faster-whisper 已安装。"}
+        with _ASR_INSTALL_LOCK:
+            existing = _ASR_INSTALL_JOBS.get(model_id)
+            if existing and existing.get("status") == "running":
+                return {"ok": True, "status": "running", "message": existing.get("message", "正在安装。")}
+            _ASR_INSTALL_JOBS[model_id] = {
+                "status": "running",
+                "message": "正在安装 faster-whisper。",
+                "error": "",
+            }
+        t = threading.Thread(target=_run_asr_install_job, args=(model_id,), daemon=True, name="asr-install-whisper")
+        t.start()
+        return {"ok": True, "status": "running", "message": "已开始安装 faster-whisper。"}
+    if not _asr_import_error_for_engine("parakeet"):
+        with _ASR_INSTALL_LOCK:
+            _ASR_INSTALL_JOBS[model_id] = {
+                "status": "succeeded",
+                "message": "Parakeet 已安装。重启软件后即可启用。",
+                "error": "",
+            }
+        return {"ok": True, "status": "installed", "message": "Parakeet 已安装。"}
+    with _ASR_INSTALL_LOCK:
+        existing = _ASR_INSTALL_JOBS.get(model_id)
+        if existing and existing.get("status") == "running":
+            return {"ok": True, "status": "running", "message": existing.get("message", "正在安装。")}
+        _ASR_INSTALL_JOBS[model_id] = {
+            "status": "running",
+            "message": "正在安装 Parakeet 依赖，首次安装可能需要几分钟。",
+            "error": "",
+        }
+    t = threading.Thread(target=_run_asr_install_job, args=(model_id,), daemon=True, name="asr-install")
+    t.start()
+    return {"ok": True, "status": "running", "message": "已开始安装 Parakeet。"}
+
+
+@app.post(f"{_API_PREFIX}/asr/models/{{model_id}}/uninstall")
+def uninstall_asr_model(model_id: str) -> Dict[str, Any]:
+    if model_id not in (_PARAKEET_MODEL_ID, _WHISPER_MODEL_ID):
+        raise HTTPException(status_code=404, detail="未知 ASR 模型。")
+    if model_id == _WHISPER_MODEL_ID:
+        if get_asr_engine() == "faster_whisper":
+            if not _asr_import_error_for_engine("parakeet"):
+                os.environ["RT_ASR_ENGINE"] = "parakeet"
+                os.environ["RT_ASR_MODEL"] = "nvidia/parakeet-tdt-0.6b-v2"
+                reset_asr_model_cache()
+            else:
+                raise HTTPException(status_code=400, detail="当前正在使用 faster-whisper，且没有其他可用转写模型。")
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "uninstall", "-y", "faster-whisper"],
+            cwd=_project_root(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=600,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"卸载失败：{(proc.stdout or '').strip()[-500:]}",
+            )
+        with _ASR_INSTALL_LOCK:
+            _ASR_INSTALL_JOBS.pop(model_id, None)
+        return {"ok": True, "status": "not_installed", "message": "已卸载。"}
+    if get_asr_engine() == "parakeet":
+        os.environ["RT_ASR_ENGINE"] = "faster_whisper"
+        os.environ["RT_ASR_MODEL"] = "medium"
+        reset_asr_model_cache()
+    venv_dir = os.path.join(_project_root(), _PARAKEET_VENV_DIR)
+    if os.path.exists(venv_dir):
+        trash_dir = f"{venv_dir}.uninstalled-{uuid.uuid4().hex[:8]}"
+        try:
+            os.replace(venv_dir, trash_dir)
+            shutil.rmtree(trash_dir, ignore_errors=True)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"卸载失败：{str(exc)[:200]}",
+            ) from exc
+    with _ASR_INSTALL_LOCK:
+        _ASR_INSTALL_JOBS.pop(model_id, None)
+    return {"ok": True, "status": "not_installed", "message": "已卸载。"}
+
+
+@app.post(f"{_API_PREFIX}/asr/models/{{model_id}}/activate")
+def activate_asr_model(model_id: str) -> Dict[str, Any]:
+    if model_id == _PARAKEET_MODEL_ID:
+        engine = "parakeet"
+        model = "nvidia/parakeet-tdt-0.6b-v2"
+    elif model_id == _WHISPER_MODEL_ID:
+        engine = "faster_whisper"
+        model = "medium"
+    elif model_id == _ONLINE_ASR_MODEL_ID:
+        engine = "online_api"
+        raw = asr_online_settings.load_raw()
+        model = (raw.get("model") or "").strip()
+    else:
+        raise HTTPException(status_code=404, detail="未知 ASR 模型。")
+    import_error = _asr_runtime_import_error_for_engine(engine)
+    if import_error:
+        raise HTTPException(
+            status_code=400,
+            detail="当前模型还不能直接启用。请先完成安装，或重启软件后再试。",
+        )
+    os.environ["RT_ASR_ENGINE"] = engine
+    os.environ["RT_ASR_MODEL"] = model
+    reset_asr_model_cache()
+    return {"ok": True, "engine": engine, "model": model, "message": "已启用。"}
 
 
 @app.get(f"{_API_PREFIX}/health")
@@ -155,6 +667,8 @@ def health() -> Dict[str, Any]:
         "llm_settings": True,
         # 含 POST /api/settings/llm/test；旧进程无此字段
         "llm_test": True,
+        # 含在线 ASR API 配置与测试路由
+        "asr_online_settings": True,
         # 当前进程翻译走 requests/urllib3；无此字段多为未重启的旧 API
         "llm_translate": "requests",
     }
@@ -173,6 +687,32 @@ class LlmSettingsIn(BaseModel):
     base_url: str = Field(min_length=1, max_length=2000)
     model: str = Field(min_length=1, max_length=200)
     api_key: str = Field(default="")
+
+
+class AsrOnlineSettingsOut(BaseModel):
+    vendor: str
+    base_url: str
+    model: str
+    api_key_configured: bool
+    api_key_tail: Optional[str] = None
+    language_hint: Optional[str] = None
+
+
+class AsrOnlineSettingsIn(BaseModel):
+    vendor: str = Field(default="openai-audio-compatible", min_length=1, max_length=64)
+    base_url: str = Field(min_length=1, max_length=2000)
+    model: str = Field(min_length=1, max_length=200)
+    api_key: str = Field(default="")
+    language_hint: Optional[str] = Field(default=None, max_length=20)
+
+
+class PromptSettingsOut(BaseModel):
+    system_prompt: str
+    default_system_prompt: str
+
+
+class PromptSettingsIn(BaseModel):
+    system_prompt: str = Field(min_length=1, max_length=4000)
 
 
 # UI 中文名 / 与前端 code 的别名 → 无歧义英文，提高翻译模型对目标语遵从度
@@ -232,6 +772,19 @@ class TranslateOut(BaseModel):
     translation: str
 
 
+def _is_realtime_reasoning_model(model: str) -> bool:
+    model_l = (model or "").lower()
+    return any(
+        marker in model_l
+        for marker in ("glm-5", "deepseek-reasoner", "o1", "o3", "o4", "gpt-5")
+    )
+
+
+def _supports_disabled_thinking_param(model: str) -> bool:
+    model_l = (model or "").lower()
+    return model_l.startswith("glm-") or "glm-5" in model_l
+
+
 @app.get(f"{_API_PREFIX}/settings/llm", response_model=LlmSettingsOut)
 def get_llm_settings() -> LlmSettingsOut:
     raw = load_raw()
@@ -269,8 +822,181 @@ def post_llm_settings(body: LlmSettingsIn) -> Dict[str, Any]:
             "base_url": b,
             "model": m,
             "api_key": final_key,
+            "system_prompt": (raw.get("system_prompt") or "").strip(),
         },
     )
+    return {"ok": True, "message": "saved"}
+
+
+@app.get(f"{_API_PREFIX}/settings/asr-online", response_model=AsrOnlineSettingsOut)
+def get_asr_online_settings() -> AsrOnlineSettingsOut:
+    raw = asr_online_settings.load_raw()
+    key = (raw.get("api_key") or "").strip()
+    return AsrOnlineSettingsOut(
+        vendor=(raw.get("vendor") or "openai-audio-compatible")[:64],
+        base_url=(raw.get("base_url") or "")[:2000],
+        model=(raw.get("model") or "")[:200],
+        api_key_configured=bool(key),
+        api_key_tail=asr_online_settings.key_tail_for_display(key),
+        language_hint=(raw.get("language_hint") or "")[:20] or None,
+    )
+
+
+@app.post(f"{_API_PREFIX}/settings/asr-online")
+def post_asr_online_settings(body: AsrOnlineSettingsIn) -> Dict[str, Any]:
+    base_url = (body.base_url or "").strip()
+    model = (body.model or "").strip()
+    vendor = (body.vendor or "").strip()
+    if not base_url.startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400,
+            detail="Base URL 须以 http:// 或 https:// 开头",
+        )
+    new_key = (body.api_key or "").strip()
+    raw = asr_online_settings.load_raw()
+    old_key = (raw.get("api_key") or "").strip()
+    if not new_key and not old_key:
+        raise HTTPException(status_code=400, detail="请填写 API Key")
+    final_key = new_key if new_key else old_key
+    payload: dict[str, Any] = {
+        "vendor": vendor,
+        "base_url": base_url,
+        "model": model,
+        "api_key": final_key,
+    }
+    if body.language_hint:
+        payload["language_hint"] = body.language_hint.strip()
+    asr_online_settings.save_raw(payload)
+    return {"ok": True, "message": "saved"}
+
+
+def _tiny_wav_for_asr_test() -> bytes:
+    # 0.4s silence is enough to validate OpenAI-style multipart audio routing without sending user audio.
+    return wav_bytes_from_pcm16_16k_mono(b"\x00\x00" * int(_ASR_SAMPLE_RATE * 0.4))
+
+
+@app.post(f"{_API_PREFIX}/settings/asr-online/test")
+def test_asr_online_settings(body: AsrOnlineSettingsIn) -> Dict[str, Any]:
+    base_url = (body.base_url or "").strip().rstrip("/")
+    model = (body.model or "").strip()
+    if not base_url.startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400,
+            detail="Base URL 须以 http:// 或 https:// 开头",
+        )
+    new_key = (body.api_key or "").strip()
+    raw = asr_online_settings.load_raw()
+    old_key = (raw.get("api_key") or "").strip()
+    if not new_key and not old_key:
+        raise HTTPException(
+            status_code=400,
+            detail="请填写 API Key，或先点击「保存」再测已存 Key。",
+        )
+    final_key = new_key if new_key else old_key
+    headers = {
+        "Authorization": f"Bearer {final_key}",
+        "Accept": "application/json",
+        "User-Agent": "realtime-translate/0.1 (online-asr-test)",
+    }
+    try:
+        r = requests.post(
+            f"{base_url}/audio/transcriptions",
+            headers=headers,
+            data={
+                "model": model,
+                **({"language": body.language_hint.strip()} if body.language_hint and body.language_hint.strip() not in ("auto", "") else {}),
+            },
+            files={"file": ("test.wav", _tiny_wav_for_asr_test(), "audio/wav")},
+            timeout=(30.0, 120.0),
+        )
+    except req_exc.ConnectionError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无法连接：{str(exc)[:200]}",
+        ) from exc
+    except req_exc.Timeout as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="请求超时，请检查网络与 Base URL。",
+        ) from exc
+    except req_exc.RequestException as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"请求失败：{str(exc)[:200]}",
+        ) from exc
+
+    parsed: Any = None
+    try:
+        parsed = r.json()
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    err_snip = _llm_upstream_error_snippet(parsed) if parsed is not None else ""
+    if 200 <= r.status_code < 300 and not err_snip:
+        return {"ok": True, "message": "连接成功，在线转写端点有响应。"}
+    if r.status_code in (401, 403):
+        detail = err_snip or "Key 或权限无效。"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Key 或权限无效（HTTP {r.status_code}）：{detail}",
+        )
+    if r.status_code in (404, 405):
+        try:
+            models_r = requests.get(
+                f"{base_url}/models",
+                headers=headers,
+                timeout=(30.0, 120.0),
+            )
+        except req_exc.RequestException as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"转写端点不可用，且模型列表验证失败：{str(exc)[:200]}",
+            ) from exc
+        try:
+            models_parsed: Any = models_r.json()
+        except (json.JSONDecodeError, TypeError, ValueError):
+            models_parsed = None
+        models_err = _llm_upstream_error_snippet(models_parsed)
+        if 200 <= models_r.status_code < 300 and not models_err:
+            model_ids = _parse_model_ids(models_parsed)
+            if model_ids and model not in model_ids:
+                preview = "、".join(model_ids[:8])
+                more = " 等" if len(model_ids) > 8 else ""
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"端点与 Key 有效，但模型列表中未找到 {model}。可用模型示例：{preview}{more}",
+                )
+            return {"ok": True, "message": "连接成功，模型列表可用；该端点未验证实际转写。"}
+    if r.status_code == 400 and not err_snip:
+        return {"ok": True, "message": "端点已响应；测试音频未被接受，但鉴权与路由可达。"}
+    detail = err_snip or (r.text or "")[:300] or "无响应内容"
+    raise HTTPException(
+        status_code=400,
+        detail=f"在线转写端点返回 HTTP {r.status_code}：{detail}"[:500],
+    )
+
+
+def _load_translation_system_prompt() -> str:
+    raw = load_raw()
+    custom = (raw.get("system_prompt") or "").strip()
+    return custom or _DEFAULT_TRANSLATION_SYSTEM_PROMPT
+
+
+@app.get(f"{_API_PREFIX}/settings/prompt", response_model=PromptSettingsOut)
+def get_prompt_settings() -> PromptSettingsOut:
+    return PromptSettingsOut(
+        system_prompt=_load_translation_system_prompt(),
+        default_system_prompt=_DEFAULT_TRANSLATION_SYSTEM_PROMPT,
+    )
+
+
+@app.post(f"{_API_PREFIX}/settings/prompt")
+def post_prompt_settings(body: PromptSettingsIn) -> Dict[str, Any]:
+    prompt = (body.system_prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="请填写系统提示词")
+    raw = load_raw()
+    raw["system_prompt"] = prompt
+    save_raw(raw)
     return {"ok": True, "message": "saved"}
 
 
@@ -451,9 +1177,11 @@ def _openai_translate_request_json(
         if (body.target_lang_code or "").strip() == "zh" or "Simplified Chinese" in tgt
         else ""
     )
-    # 实时翻译的首 token 延迟很敏感。短片段不应申请 1024+ token，
-    # 否则部分兼容网关/推理模型会显著放慢调度或首包。
-    if stream:
+    reasoning_like = _is_realtime_reasoning_model(model)
+    # 实时翻译的首 token 延迟很敏感，但推理模型会消耗隐藏 token；预算过小会返回 length + 空 content。
+    if reasoning_like:
+        max_tokens = min(1536, max(256 if stream else 384, int(len(text) * 1.8) + 160))
+    elif stream:
         max_tokens = min(2048, max(96, int(len(text) * 1.6) + 64))
     else:
         max_tokens = min(4096, max(256, int(len(text) * 1.6) + 128))
@@ -465,30 +1193,21 @@ def _openai_translate_request_json(
     if previous_source or previous_translation:
         context_bits: list[str] = []
         if previous_source:
-            context_bits.append(f"Previous source context:\n{previous_source[-1800:]}")
+            context_bits.append(f"Previous source context:\n{previous_source[-600:]}")
         if previous_translation:
-            context_bits.append(f"Previous target-language translation context:\n{previous_translation[-1800:]}")
+            context_bits.append(f"Previous target-language translation context:\n{previous_translation[-600:]}")
         context_block = "\n\n".join(context_bits)
         translate_instruction = (
             "Use the previous context only for continuity. Translate ONLY the current source block below; "
             "do not repeat or revise the previous translation. If the current block is a fragment, "
             "make it read naturally as a continuation."
         )
-    return {
+    req: Dict[str, Any] = {
         "model": model,
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "You are a live interpreter. Translate the user text. "
-                    "The answer language must be ONLY the target language, including single words, "
-                    "fragments, and numbers written as that language would normally write them, "
-                    "not left in the source. "
-                    "If the user text is already in the target language, return it with minimal edits. "
-                    f"{zh_extra} "
-                    "No headings, no quotes around the result, no explanations, no markdown. "
-                    "Output plain translated text only."
-                ),
+                "content": f"{_load_translation_system_prompt()} {zh_extra}".strip(),
             },
             {
                 "role": "user",
@@ -506,6 +1225,9 @@ def _openai_translate_request_json(
         "max_tokens": max_tokens,
         "stream": stream,
     }
+    if stream and _supports_disabled_thinking_param(model):
+        req["thinking"] = {"type": "disabled"}
+    return req
 
 
 def _ndjson_error_line(message: str) -> bytes:
@@ -770,6 +1492,7 @@ def _llm_requests_post_chat(
     last_exc: Optional[BaseException] = None
     for attempt in range(3):
         try:
+            _pace_llm_request()
             return requests.post(
                 url,
                 headers=headers,
@@ -787,12 +1510,79 @@ def _llm_requests_post_chat(
     raise RuntimeError("unreachable")
 
 
+def _llm_retry_without_thinking_if_needed(
+    response: requests.Response,
+    base_url: str,
+    headers: dict[str, str],
+    json_body: Dict[str, Any],
+    *,
+    stream: bool,
+) -> requests.Response:
+    if response.status_code not in (400, 422) or "thinking" not in json_body:
+        return response
+    body_text = (response.text or "")[:1000]
+    if "thinking" not in body_text.lower():
+        return response
+    try:
+        response.close()
+    except Exception:
+        pass
+    retry_body = dict(json_body)
+    retry_body.pop("thinking", None)
+    return _llm_requests_post_chat(
+        base_url,
+        headers=headers,
+        json_body=retry_body,
+        stream=stream,
+    )
+
+
+def _llm_rate_limit_retry_delay(response: requests.Response) -> float:
+    raw = (response.headers.get("Retry-After") or "").strip()
+    if raw:
+        try:
+            return min(8.0, max(1.0, float(raw)))
+        except ValueError:
+            pass
+    return _llm_env_float("RT_LLM_RATE_LIMIT_RETRY_DELAY", 2.0)
+
+
+def _llm_retry_rate_limit_once(
+    response: requests.Response,
+    base_url: str,
+    headers: dict[str, str],
+    json_body: Dict[str, Any],
+    *,
+    stream: bool,
+) -> requests.Response:
+    if response.status_code != 429:
+        return response
+    try:
+        response.close()
+    except Exception:
+        pass
+    time.sleep(_llm_rate_limit_retry_delay(response))
+    return _llm_requests_post_chat(
+        base_url,
+        headers=headers,
+        json_body=json_body,
+        stream=stream,
+    )
+
+
 def _sse_lines_from_requests_stream(r: requests.Response) -> Iterator[str]:
     # requests 默认 chunk_size=512，会把很多很小的 SSE delta 缓冲到 512 字节后才交给 iter_lines。
     # 对实时字幕而言这会直接表现为“流式很慢”，这里用 1 字节换最低首包/逐 token 延迟。
-    for line in r.iter_lines(chunk_size=1, decode_unicode=True):
-        if line and str(line).strip():
-            yield str(line)
+    # 部分 OpenAI 兼容网关未声明 charset，requests 会按 ISO-8859-1 解码，中文流会变成乱码。
+    for line in r.iter_lines(chunk_size=1, decode_unicode=False):
+        if not line:
+            continue
+        if isinstance(line, bytes):
+            line_s = line.decode("utf-8", errors="replace")
+        else:
+            line_s = str(line)
+        if line_s.strip():
+            yield line_s
 
 
 def _sync_translate_stream_producer(body: TranslateIn, out_q: "queue.Queue[Optional[bytes]]") -> None:
@@ -809,15 +1599,30 @@ def _sync_translate_stream_producer(body: TranslateIn, out_q: "queue.Queue[Optio
     tlog = (body.text or "").strip()[:200]
     robj: Optional[requests.Response] = None
     try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "realtime-translate/0.1 (translate-stream)",
+        }
         robj = _llm_requests_post_chat(
             base_url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-                "User-Agent": "realtime-translate/0.1 (translate-stream)",
-            },
+            headers=headers,
             json_body=req,
+            stream=True,
+        )
+        robj = _llm_retry_without_thinking_if_needed(
+            robj,
+            base_url,
+            headers,
+            req,
+            stream=True,
+        )
+        robj = _llm_retry_rate_limit_once(
+            robj,
+            base_url,
+            headers,
+            req,
             stream=True,
         )
         if robj.status_code < 200 or robj.status_code >= 300:
@@ -901,15 +1706,30 @@ def _sync_translate_accumulate_via_stream(body: TranslateIn) -> str:
     jreq = _openai_translate_request_json(body, model, stream=True)
     r: Optional[requests.Response] = None
     try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "realtime-translate/0.1 (translate-fallback-stream)",
+        }
         r = _llm_requests_post_chat(
             base_url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-                "User-Agent": "realtime-translate/0.1 (translate-fallback-stream)",
-            },
+            headers=headers,
             json_body=jreq,
+            stream=True,
+        )
+        r = _llm_retry_without_thinking_if_needed(
+            r,
+            base_url,
+            headers,
+            jreq,
+            stream=True,
+        )
+        r = _llm_retry_rate_limit_once(
+            r,
+            base_url,
+            headers,
+            jreq,
             stream=True,
         )
         if r.status_code < 200 or r.status_code >= 300:
@@ -975,15 +1795,23 @@ def _sync_translate_post_request(body: TranslateIn) -> TranslateOut:
     tlog = (body.text or "").strip()[:200]
     req = _openai_translate_request_json(body, model, stream=False)
     try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "realtime-translate/0.1 (translate-json)",
+        }
         r = _llm_requests_post_chat(
             base_url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "realtime-translate/0.1 (translate-json)",
-            },
+            headers=headers,
             json_body=req,
+            stream=False,
+        )
+        r = _llm_retry_rate_limit_once(
+            r,
+            base_url,
+            headers,
+            req,
             stream=False,
         )
     except (req_exc.ConnectionError, req_exc.Timeout) as exc:
@@ -1059,12 +1887,13 @@ async def translate_text(body: TranslateIn) -> TranslateOut:
 async def asr_ws(websocket: WebSocket) -> None:
     await websocket.accept()
     if not is_asr_importable():
+        import_error = get_asr_import_error()
         try:
             await websocket.send_json(
                 {
                     "type": "error",
                     "message": "asr_unavailable",
-                    "detail": "faster-whisper 未安装。在 backend 目录执行 pip install -r requirements.txt 后重试。",
+                    "detail": import_error,
                 }
             )
         except Exception:
@@ -1098,42 +1927,160 @@ async def asr_ws(websocket: WebSocket) -> None:
         language = None if raw_lang == "auto" else raw_lang
 
     loop = asyncio.get_running_loop()
+    sid = uuid.uuid4().hex[:16]
+    segment_id = 1
+    segment_pcm = bytearray()
+    last_voice_at = time.monotonic()
+    last_partial_at = 0.0
+    last_emitted_by_segment: dict[int, str] = {}
+    segment_started_at = time.monotonic()
+    session_started_at = segment_started_at
+    asr_task: Optional[asyncio.Task[tuple[int, bool, str, int, int, float]]] = None
+    await websocket.send_json(
+        {
+            "type": "started",
+            "action": "started",
+            "sid": sid,
+            "engine": get_asr_engine(),
+            "model": get_asr_model_name(),
+            "sample_rate": _ASR_SAMPLE_RATE,
+            "frame_ms": 40,
+        }
+    )
+
+    def _schedule_asr_job(*, final: bool, now: float) -> bool:
+        nonlocal asr_task, last_partial_at
+        if asr_task is not None and not asr_task.done():
+            return False
+        pcm = bytes(segment_pcm)
+        sid0 = segment_id
+        bg_ms = int((segment_started_at - session_started_at) * 1000)
+        ed_ms = int((now - session_started_at) * 1000)
+
+        async def _run_snapshot() -> tuple[int, bool, str, int, int, float]:
+            started = time.monotonic()
+
+            def _run() -> str:
+                return transcribe_int16_16k_mono(
+                    pcm,
+                    language=language,
+                )
+
+            text = await loop.run_in_executor(None, _run)
+            return (sid0, final, text, bg_ms, ed_ms, time.monotonic() - started)
+
+        asr_task = asyncio.create_task(_run_snapshot())
+        last_partial_at = now
+        return True
+
+    async def _flush_asr_job() -> None:
+        nonlocal asr_task
+        if asr_task is None or not asr_task.done():
+            return
+        task = asr_task
+        asr_task = None
+        try:
+            sid0, final0, text, bg_ms, ed_ms, cost_sec = task.result()
+        except Exception as exc:  # noqa: BLE001
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": "asr failed",
+                    "detail": str(exc)[:200],
+                }
+            )
+            return
+        t = (text or "").strip()
+        previous = last_emitted_by_segment.get(sid0, "")
+        if not t or not (_asr_text_changed(previous, t) or final0):
+            return
+        last_emitted_by_segment[sid0] = t
+        await websocket.send_json(
+            {
+                "type": "final_transcript" if final0 else "partial_transcript",
+                "action": "result",
+                "text": t,
+                "segment_id": sid0,
+                "final": final0,
+                "result_type": 0 if final0 else 1,
+                "bg_ms": bg_ms,
+                "ed_ms": ed_ms,
+                "asr_cost_ms": int(cost_sec * 1000),
+            }
+        )
 
     try:
         while True:
-            msg = await websocket.receive()
+            await _flush_asr_job()
+            try:
+                msg = await asyncio.wait_for(websocket.receive(), timeout=0.05)
+            except asyncio.TimeoutError:
+                continue
             if msg.get("type") == "websocket.disconnect":
                 break
+            text_msg = msg.get("text")
+            if isinstance(text_msg, str):
+                try:
+                    ctrl = json.loads(text_msg)
+                except json.JSONDecodeError:
+                    continue
+                if ctrl.get("end") is True or ctrl.get("type") == "end":
+                    if segment_pcm:
+                        if asr_task is not None and not asr_task.done():
+                            try:
+                                await asyncio.wait_for(asr_task, timeout=30.0)
+                            except asyncio.TimeoutError:
+                                await websocket.send_json(
+                                    {
+                                        "type": "error",
+                                        "message": "asr failed",
+                                        "detail": "ASR timed out before final flush",
+                                    }
+                                )
+                            await _flush_asr_job()
+                        _schedule_asr_job(final=True, now=time.monotonic())
+                        if asr_task is not None:
+                            try:
+                                await asyncio.wait_for(asr_task, timeout=30.0)
+                            except asyncio.TimeoutError:
+                                await websocket.send_json(
+                                    {
+                                        "type": "error",
+                                        "message": "asr failed",
+                                        "detail": "final ASR timed out",
+                                    }
+                                )
+                            await _flush_asr_job()
+                    break
+                continue
             b = msg.get("bytes")
             if not b:
                 continue
             if not isinstance(b, (bytes, bytearray, memoryview)):
                 continue
+            now = time.monotonic()
+            frame = bytes(b)
+            segment_pcm.extend(frame)
+            if _pcm16_rms(frame) >= _ASR_RMS_SPEECH_THRESHOLD:
+                last_voice_at = now
 
-            def _run() -> str:
-                return transcribe_int16_16k_mono(
-                    bytes(b),
-                    language=language,
-                )
-
-            try:
-                text = await loop.run_in_executor(None, _run)
-            except Exception as exc:  # noqa: BLE001
-                await websocket.send_json(
-                    {
-                        "type": "error",
-                        "message": "asr failed",
-                        "detail": str(exc)[:200],
-                    }
-                )
+            duration = _pcm16_duration_sec(segment_pcm)
+            if duration < _ASR_MIN_TRANSCRIBE_SEC:
                 continue
 
-            if text:
-                await websocket.send_json(
-                    {
-                        "type": "transcript",
-                        "text": text,
-                    }
-                )
+            is_endpoint = now - last_voice_at >= _ASR_ENDPOINT_SILENCE_SEC
+            is_too_long = duration >= _ASR_MAX_SEGMENT_SEC
+            should_partial = now - last_partial_at >= _ASR_PARTIAL_INTERVAL_SEC
+            if not (is_endpoint or is_too_long or should_partial):
+                continue
+            final = bool(is_endpoint or is_too_long)
+            if not _schedule_asr_job(final=final, now=now):
+                continue
+            if final:
+                segment_id += 1
+                segment_pcm = bytearray()
+                segment_started_at = time.monotonic()
+                last_voice_at = segment_started_at
+                last_partial_at = 0.0
     except WebSocketDisconnect:
         pass

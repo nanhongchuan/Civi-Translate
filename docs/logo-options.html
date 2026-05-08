@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Civi Translate Logo 方案</title>
+    <style>
+      :root { color: #172033; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f8fb; }
+      body { margin: 0; padding: 40px; }
+      h1 { margin: 0 0 8px; font-size: 24px; }
+      p { margin: 0; color: #64748b; }
+      .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; margin-top: 28px; }
+      .card { border: 1px solid #e2e8f0; border-radius: 18px; background: white; padding: 24px; box-shadow: 0 14px 40px rgba(15, 23, 42, .08); }
+      .logo { position: relative; display: grid; place-items: center; width: 80px; height: 80px; overflow: hidden; border-radius: 23px; color: white; box-shadow: 0 18px 36px rgba(37, 99, 235, .22); }
+      .logo::before { content: ""; position: absolute; left: -28px; top: -28px; width: 64px; height: 64px; border-radius: 999px; background: rgba(255,255,255,.2); filter: blur(18px); }
+      .live { background: linear-gradient(135deg, #06b6d4, #2563eb 48%, #6d28d9); }
+      .loop { background: linear-gradient(135deg, #0f766e, #2563eb 48%, #4f46e5); }
+      .caption { background: linear-gradient(135deg, #0284c7, #4f46e5 50%, #7c3aed); }
+      .civi { background: linear-gradient(135deg, #0f172a, #1d4ed8 52%, #06b6d4); }
+      svg { position: relative; width: 56px; height: 56px; }
+      .small { width: 48px; height: 48px; border-radius: 16px; }
+      .small svg { width: 36px; height: 36px; }
+      h2 { margin: 18px 0 6px; font-size: 16px; }
+      .desc { min-height: 42px; font-size: 13px; line-height: 1.6; }
+      .brand { margin-top: 20px; display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 16px; background: #0f172a; }
+      .brand strong { display: block; color: white; font-size: 15px; }
+      .brand span { display: block; color: #94a3b8; font-size: 12px; margin-top: 2px; }
+      @media (max-width: 1000px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    </style>
+  </head>
+  <body>
+    <h1>Civi Translate Logo 候选</h1>
+    <p>这版重点体现“实时翻译”：在线状态、声音输入、低延迟转换，而不是单纯品牌字母。</p>
+
+    <div class="grid">
+      <section class="card">
+        <div class="logo live">
+          <svg viewBox="0 0 64 64" fill="none">
+            <circle cx="14.5" cy="16.5" r="3.8" fill="#bbf7d0"/>
+            <path d="M16 38V26M26 44V20M36 38V26" stroke="white" stroke-width="5.6" stroke-linecap="round"/>
+            <path d="M42 32h13" stroke="white" stroke-width="5" stroke-linecap="round"/>
+            <path d="M50 25l7 7-7 7" stroke="white" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h2>A. Live</h2>
+        <p class="desc">绿点=实时在线，声波=语音转写，箭头=即时翻译。</p>
+        <div class="brand">
+          <div class="logo small live">
+            <svg viewBox="0 0 64 64" fill="none"><circle cx="14.5" cy="16.5" r="3.8" fill="#bbf7d0"/>
+            <path d="M16 38V26M26 44V20M36 38V26" stroke="white" stroke-width="5.6" stroke-linecap="round"/>
+            <path d="M42 32h13" stroke="white" stroke-width="5" stroke-linecap="round"/>
+            <path d="M50 25l7 7-7 7" stroke="white" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div><strong>利群翻译</strong><span>Civi Translate</span></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="logo loop">
+          <svg viewBox="0 0 64 64" fill="none">
+            <path d="M46 19a19 19 0 0 0-28 6" stroke="white" stroke-width="4.6" stroke-linecap="round"/>
+            <path d="M18 45a19 19 0 0 0 28-6" stroke="white" stroke-width="4.6" stroke-linecap="round" opacity=".72"/>
+            <path d="M43 18h6v6M21 46h-6v-6" stroke="white" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M25 38V26M33 42V22M41 38V26" stroke="white" stroke-width="4.2" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h2>B. Loop</h2>
+        <p class="desc">循环箭头强调实时往返，中心保留语音转写。</p>
+        <div class="brand">
+          <div class="logo small loop">
+            <svg viewBox="0 0 64 64" fill="none"><path d="M46 19a19 19 0 0 0-28 6" stroke="white" stroke-width="4.6" stroke-linecap="round"/><path d="M18 45a19 19 0 0 0 28-6" stroke="white" stroke-width="4.6" stroke-linecap="round" opacity=".72"/><path d="M43 18h6v6M21 46h-6v-6" stroke="white" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M25 38V26M33 42V22M41 38V26" stroke="white" stroke-width="4.2" stroke-linecap="round"/></svg>
+          </div>
+          <div><strong>利群翻译</strong><span>Civi Translate</span></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="logo caption">
+          <svg viewBox="0 0 64 64" fill="none">
+            <rect x="13" y="18" width="38" height="28" rx="9" stroke="white" stroke-width="4.6"/>
+            <circle cx="22" cy="27" r="3.6" fill="#bbf7d0"/>
+            <path d="M29 27h12M23 37h18" stroke="white" stroke-width="4.2" stroke-linecap="round"/>
+            <path d="M43 37h7l-3-3" stroke="white" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h2>C. Caption</h2>
+        <p class="desc">更像实时字幕/同传卡片，适合产品工具感。</p>
+        <div class="brand">
+          <div class="logo small caption">
+            <svg viewBox="0 0 64 64" fill="none"><rect x="13" y="18" width="38" height="28" rx="9" stroke="white" stroke-width="4.6"/><circle cx="22" cy="27" r="3.6" fill="#bbf7d0"/><path d="M29 27h12M23 37h18" stroke="white" stroke-width="4.2" stroke-linecap="round"/><path d="M43 37h7l-3-3" stroke="white" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div><strong>利群翻译</strong><span>Civi Translate</span></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="logo civi">
+          <svg viewBox="0 0 64 64" fill="none">
+            <circle cx="45" cy="19" r="4.4" fill="#bbf7d0"/>
+            <path d="M42 20.5a17 17 0 1 0 0 23" stroke="white" stroke-width="5.6" stroke-linecap="round"/>
+            <path d="M26 38V26M34 42V22" stroke="white" stroke-width="4.8" stroke-linecap="round"/>
+            <path d="M40 34h8l-3-3" stroke="white" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>
+          </svg>
+        </div>
+        <h2>D. Civi Live</h2>
+        <p class="desc">把 Civi 的 C 和实时翻译含义结合，品牌识别更强。</p>
+        <div class="brand">
+          <div class="logo small civi">
+            <svg viewBox="0 0 64 64" fill="none"><circle cx="45" cy="19" r="4.4" fill="#bbf7d0"/><path d="M42 20.5a17 17 0 1 0 0 23" stroke="white" stroke-width="5.6" stroke-linecap="round"/><path d="M26 38V26M34 42V22" stroke="white" stroke-width="4.8" stroke-linecap="round"/><path d="M40 34h8l-3-3" stroke="white" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/></svg>
+          </div>
+          <div><strong>利群翻译</strong><span>Civi Translate</span></div>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>

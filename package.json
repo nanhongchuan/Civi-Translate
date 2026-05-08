@@ -1,15 +1,18 @@
 {
-  "name": "realtime-translate-ui",
+  "name": "civi-translate",
   "private": true,
   "version": "0.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "dev:all": "concurrently -n \"api,web\" -c \"#38bdf8,#c084fc\" \"npm run api\" \"npm run dev\"",
+    "dev:all:parakeet": "concurrently -n \"api,web\" -c \"#38bdf8,#c084fc\" \"npm run api:parakeet\" \"npm run dev\"",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "api": "cd backend && python3 -m uvicorn app.main:app --host 127.0.0.1 --port 18787",
+    "api:parakeet": "cd backend && RT_ASR_ENGINE=parakeet RT_ASR_MODEL=nvidia/parakeet-tdt-0.6b-v2 ../.venv-parakeet/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 18787",
     "api:install": "cd backend && python3 -m pip install -r requirements.txt",
+    "api:install:parakeet": "uv venv .venv-parakeet --python 3.12.12 && uv pip install --python .venv-parakeet/bin/python -r backend/requirements.txt -r backend/requirements-parakeet.txt",
     "test:api": "curl -fsS http://127.0.0.1:18787/api/health | grep -q llm_settings && curl -fsS -o /dev/null -w \"GET /api/settings/llm => %{http_code}\\n\" http://127.0.0.1:18787/api/settings/llm",
     "api:verify": "curl -fsS http://127.0.0.1:18787/api/health | grep -q llm_test && npm run api:smoke && echo 'OK: 18787 健康检查与翻译冒烟通过（若失败请先结束旧 uvicorn 再 npm run api）。'",
     "api:smoke": "cd backend && PYTHONPATH=. python3 scripts/smoke_api.py"

@@ -4,10 +4,12 @@ import { Sidebar } from "./components/Sidebar";
 import { LandingPage } from "./components/LandingPage";
 import { LiveSessionPage } from "./components/LiveSessionPage";
 import { SettingsPage } from "./components/SettingsPage";
-import { PlaceholderPage } from "./components/PlaceholderPage";
+import { FavoritesPage } from "./components/FavoritesPage";
+import { HistoryPage } from "./components/HistoryPage";
 import { StaleApiBanner } from "./components/StaleApiBanner";
 
 export type MainView = "landing" | "live" | "settings" | "history" | "favorites";
+type InitialLiveSessionState = "LIVE" | "PAUSED";
 
 const DEFAULT_SIDEBAR_W = 256;
 const MIN_SIDEBAR_W = 184;
@@ -16,7 +18,12 @@ const HIDE_SIDEBAR_W = 88;
 
 export default function App() {
   const [mainView, setMainView] = useState<MainView>("landing");
-  const [sourceLang, setSourceLang] = useState("en");
+  const [initialLiveSessionState, setInitialLiveSessionState] = useState<InitialLiveSessionState>("PAUSED");
+  const [liveSessionMounted, setLiveSessionMounted] = useState(false);
+  const [liveSessionKey, setLiveSessionKey] = useState(0);
+  const [liveSessionStartSignal, setLiveSessionStartSignal] = useState(0);
+  const [liveSessionStarted, setLiveSessionStarted] = useState(false);
+  const [sourceLang, setSourceLang] = useState("auto");
   const [targetLang, setTargetLang] = useState("zh");
   const [sidebarExpanded, setSidebarExpanded] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_W);
@@ -41,7 +48,7 @@ export default function App() {
 
   const handleTargetChange = useCallback((nextTarget: string) => {
     setTargetLang((currentTarget) => {
-      if (nextTarget !== "auto" && nextTarget === sourceLang) {
+      if (nextTarget === sourceLang) {
         setSourceLang(currentTarget);
       }
       return nextTarget;
@@ -53,10 +60,19 @@ export default function App() {
   }, []);
 
   const startSession = useCallback(() => {
+    if (!liveSessionMounted || !liveSessionStarted) {
+      setInitialLiveSessionState("LIVE");
+    }
+    setLiveSessionMounted(true);
+    setLiveSessionStartSignal((v) => v + 1);
     setMainView("live");
-  }, []);
+  }, [liveSessionMounted, liveSessionStarted]);
 
   const stopSession = useCallback(() => {
+    setLiveSessionMounted(false);
+    setLiveSessionKey((v) => v + 1);
+    setInitialLiveSessionState("PAUSED");
+    setLiveSessionStarted(false);
     setMainView("landing");
   }, []);
 
@@ -127,16 +143,24 @@ export default function App() {
   }, [isResizingSidebar]);
 
   const selectHome = useCallback(() => {
-    if (mainView === "live") {
-      const ok = window.confirm("结束当前会话并返回开始页？");
-      if (!ok) return;
-    }
     goHome();
-  }, [mainView, goHome]);
+  }, [goHome]);
 
   const selectLive = useCallback(() => {
+    if (mainView === "live") return;
+    if (!liveSessionMounted || !liveSessionStarted) {
+      setInitialLiveSessionState("PAUSED");
+    }
+    setLiveSessionMounted(true);
     setMainView("live");
-  }, []);
+  }, [liveSessionMounted, liveSessionStarted, mainView]);
+
+  const handleLiveSessionStatusChange = useCallback(
+    ({ hasStarted }: { state: InitialLiveSessionState; hasStarted: boolean }) => {
+      setLiveSessionStarted(hasStarted);
+    },
+    [],
+  );
 
   return (
     <div className="relative flex h-full min-h-0 bg-slate-100 text-slate-800">
@@ -192,22 +216,44 @@ export default function App() {
         className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${darkMode ? "bg-slate-950" : "bg-[#fafbfc]"}`}
       >
         <StaleApiBanner />
-        <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+        <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+          {liveSessionMounted ? (
+            <div className={mainView === "live" ? "h-full min-h-0" : "hidden"}>
+              <LiveSessionPage
+                key={liveSessionKey}
+                sourceLang={sourceLang}
+                targetLang={targetLang}
+                onSourceChange={handleSourceChange}
+                onTargetChange={handleTargetChange}
+                onSwapLangs={handleSwapLangs}
+                initialSessionState={initialLiveSessionState}
+                startSignal={liveSessionStartSignal}
+                onSessionStatusChange={handleLiveSessionStatusChange}
+                onStop={stopSession}
+              />
+            </div>
+          ) : null}
           {mainView === "settings" ? (
             <SettingsPage onBack={goHome} />
           ) : mainView === "history" ? (
-            <PlaceholderPage title="记录" onBack={goHome} />
+            <HistoryPage onBack={goHome} />
           ) : mainView === "favorites" ? (
-            <PlaceholderPage title="收藏" onBack={goHome} />
+            <FavoritesPage onBack={goHome} />
           ) : mainView === "live" ? (
-            <LiveSessionPage
-              sourceLang={sourceLang}
-              targetLang={targetLang}
-              onSourceChange={handleSourceChange}
-              onTargetChange={handleTargetChange}
-              onSwapLangs={handleSwapLangs}
-              onStop={stopSession}
-            />
+            liveSessionMounted ? null : (
+              <LiveSessionPage
+                key={liveSessionKey}
+                sourceLang={sourceLang}
+                targetLang={targetLang}
+                onSourceChange={handleSourceChange}
+                onTargetChange={handleTargetChange}
+                onSwapLangs={handleSwapLangs}
+                initialSessionState={initialLiveSessionState}
+                startSignal={liveSessionStartSignal}
+                onSessionStatusChange={handleLiveSessionStatusChange}
+                onStop={stopSession}
+              />
+            )
           ) : (
             <LandingPage
               sourceLang={sourceLang}

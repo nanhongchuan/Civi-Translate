@@ -26,6 +26,8 @@ const LANGS = [
   { value: "ko", label: "韩语" },
 ] as const;
 
+const TARGET_LANGS = LANGS.filter((l) => l.value !== "auto");
+
 export function getLangLabel(value: string): string {
   const row = LANGS.find((l) => l.value === value);
   return row?.label ?? value;
@@ -47,12 +49,14 @@ function LangSelect({
   value,
   onChange,
   ariaLabel,
+  options = LANGS,
 }: {
   value: string;
   onChange: (v: string) => void;
   ariaLabel: string;
+  options?: readonly { value: string; label: string }[];
 }) {
-  const current = LANGS.find((l) => l.value === value)?.label ?? value;
+  const current = options.find((l) => l.value === value)?.label ?? getLangLabel(value);
   return (
     <Select.Root value={value} onValueChange={onChange}>
       <Select.Trigger className={selectTriggerClass} aria-label={ariaLabel}>
@@ -64,7 +68,7 @@ function LangSelect({
       <Select.Portal>
         <Select.Content className={selectContentClass} position="popper" sideOffset={6}>
           <Select.Viewport className="p-0.5">
-            {LANGS.map((l) => (
+            {options.map((l) => (
               <Select.Item
                 key={l.value}
                 value={l.value}
@@ -114,7 +118,12 @@ export function TopBarLanguages({
         ) : (
           <span className="select-none px-0.5 text-sm text-slate-400">→</span>
         )}
-        <LangSelect value={targetLang} onChange={onTargetChange} ariaLabel="目标语言" />
+        <LangSelect
+          value={targetLang}
+          onChange={onTargetChange}
+          ariaLabel="目标语言"
+          options={TARGET_LANGS}
+        />
       </div>
     </div>
   );

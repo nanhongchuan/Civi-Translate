@@ -20,6 +20,28 @@
   }
 }
 
+@keyframes live-status-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.78);
+  }
+}
+
+@keyframes live-status-bar {
+  0%,
+  100% {
+    transform: scaleY(0.45);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
 html,
 body,
 #root {
@@ -61,10 +83,23 @@ body,
   .asr-listening-breathe {
     animation: asr-listening-breathe 1.6s ease-in-out infinite;
   }
+  .live-status-dot {
+    animation: live-status-dot 1.3s ease-in-out infinite;
+  }
+  .live-status-bar {
+    width: 3px;
+    border-radius: 999px;
+    background: currentColor;
+    transform-origin: bottom;
+    animation: live-status-bar 0.9s ease-in-out infinite;
+  }
   @media (prefers-reduced-motion: reduce) {
-    .asr-listening-breathe {
+    .asr-listening-breathe,
+    .live-status-dot,
+    .live-status-bar {
       animation: none;
       opacity: 1;
+      transform: none;
     }
   }
 }

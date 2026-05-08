@@ -3,6 +3,7 @@ dist
 .DS_Store
 *.local
 .venv
+.venv-*
 venv
 __pycache__
 *.py[cod]

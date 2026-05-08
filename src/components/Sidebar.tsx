@@ -1,5 +1,6 @@
-import { Clock, Home, Mic, Settings2, Star, MessageCircle } from "lucide-react";
+import { Clock, Home, Mic, Settings2, Star } from "lucide-react";
 import type { MainView } from "../App";
+import { BrandLogo } from "./BrandLogo";
 
 type Props = {
   mainView: MainView;
@@ -35,12 +36,10 @@ export function Sidebar({
     <aside className="flex h-full min-h-0 w-full shrink-0 flex-col border-r border-slate-800/80 bg-gradient-to-b from-slate-900 to-slate-950">
       <div className="border-b border-white/5 px-5 py-6">
         <div className="flex items-start gap-3">
-          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-500 via-violet-500 to-violet-700 text-white shadow-lg shadow-violet-900/40">
-            <MessageCircle className="h-6 w-6" strokeWidth={1.75} aria-hidden />
-          </div>
+          <BrandLogo />
           <div className="min-w-0 pt-0.5">
-            <p className="truncate text-base font-bold tracking-tight text-white">利群翻译</p>
-            <p className="truncate text-xs font-medium text-slate-500">Liqun Translate</p>
+            <p className="truncate text-base font-bold tracking-tight text-white">Civi Translate</p>
+            <p className="truncate text-xs font-medium text-slate-500">Realtime interpreting</p>
           </div>
         </div>
       </div>

@@ -7,6 +7,7 @@ import {
   Moon,
   Sun,
 } from "lucide-react";
+import { BrandLogo } from "./BrandLogo";
 import { TopBarLanguages } from "./TopBarLanguages";
 
 type Props = {
@@ -19,6 +20,33 @@ type Props = {
   darkMode: boolean;
   onToggleDark: () => void;
 };
+
+const CAPABILITIES = [
+  {
+    title: "本机转写",
+    desc: "语音先在本机识别",
+    icon: AudioWaveform,
+    tone: "bg-violet-100 text-violet-600",
+  },
+  {
+    title: "语言方向",
+    desc: "顶部随时切换",
+    icon: Languages,
+    tone: "bg-emerald-100 text-emerald-600",
+  },
+  {
+    title: "会话文本",
+    desc: "原文和译文分区显示",
+    icon: FileText,
+    tone: "bg-amber-100 text-amber-600",
+  },
+  {
+    title: "导出整理",
+    desc: "保存为 Markdown",
+    icon: Download,
+    tone: "bg-sky-100 text-sky-600",
+  },
+];
 
 export function LandingPage({
   sourceLang,
@@ -36,11 +64,10 @@ export function LandingPage({
     ? "border-slate-700/80 bg-slate-900/60 shadow-none"
     : "border-slate-200/80 bg-white shadow-sm";
   const subtext = darkMode ? "text-slate-400" : "text-slate-500";
+
   return (
     <div className={`relative flex h-full min-h-0 flex-col ${surface}`}>
-      <header
-        className={`relative z-10 shrink-0 border-b backdrop-blur-md ${headerBg}`}
-      >
+      <header className={`relative z-10 shrink-0 border-b backdrop-blur-md ${headerBg}`}>
         <div className="mx-auto grid max-w-6xl grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-3.5 sm:px-6 md:px-10 lg:grid-cols-[1fr_auto_1fr]">
           <div className="hidden lg:block" aria-hidden />
           <div className="min-w-0 justify-self-center">
@@ -69,21 +96,17 @@ export function LandingPage({
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-6xl px-4 pb-6 pt-5 sm:px-6 md:px-10 md:pb-8 md:pt-6">
-          <div className="grid items-center gap-6 lg:grid-cols-[1fr_1.05fr] lg:gap-8 xl:gap-10">
-            <div className="order-2 flex flex-col items-center text-center lg:order-1 lg:items-start lg:text-left">
-              <h1
-                className={`max-w-[14ch] font-display text-[2.35rem] leading-[1.2] sm:max-w-none sm:text-5xl md:text-[3.25rem] md:leading-[1.15] ${
-                  darkMode ? "" : ""
-                } bg-gradient-to-br from-sky-600 via-violet-600 to-violet-700 bg-clip-text text-transparent`}
-              >
+      <main className="min-h-0 flex-1 overflow-hidden">
+        <div className="mx-auto flex h-full max-w-6xl flex-col px-4 pb-6 pt-5 sm:px-6 md:px-10 md:pb-8 md:pt-6">
+          <section className="grid shrink-0 items-center gap-6 md:grid-cols-[1fr_0.9fr] md:gap-8 xl:gap-10">
+            <div className="order-2 flex flex-col items-center text-center md:order-1 md:items-start md:text-left">
+              <h1 className="max-w-[14ch] bg-gradient-to-br from-sky-600 via-violet-600 to-violet-700 bg-clip-text font-display text-[2.35rem] leading-[1.2] text-transparent sm:max-w-none sm:text-5xl md:text-[3.25rem] md:leading-[1.15]">
                 实时转写
                 <br />
                 即刻翻译
               </h1>
               <p className={`mt-3 max-w-md text-[15px] leading-relaxed sm:text-base ${subtext}`}>
-                选择语言方向，开始一段本机语音会话。
+                让声音越过语言，抵达彼此
               </p>
               <button
                 type="button"
@@ -102,60 +125,34 @@ export function LandingPage({
               </div>
             </div>
 
-            <div className="order-1 flex justify-center lg:order-2 lg:justify-end">
+            <div className="order-1 flex justify-center md:order-2 md:justify-end">
               <div className="relative aspect-square w-full max-w-[min(100%,18rem)] sm:max-w-[17rem] md:max-w-[18.5rem]">
-                <div className="absolute inset-0 rounded-full bg-gradient-to-br from-violet-200/40 via-sky-100/50 to-transparent blur-2xl dark:from-violet-900/30 dark:via-slate-800/50" />
-                <div className="absolute inset-[8%] rounded-full border border-violet-200/30 dark:border-violet-700/30" />
-                <div className="absolute inset-[18%] rounded-full border border-sky-200/25 dark:border-sky-800/30" />
+                <div className="absolute inset-0 rounded-full bg-gradient-to-br from-violet-200/40 via-sky-100/50 to-transparent blur-2xl" />
+                <div className="absolute inset-[8%] rounded-full border border-violet-200/30" />
+                <div className="absolute inset-[18%] rounded-full border border-sky-200/25" />
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <div
-                    className={`flex h-36 w-36 flex-col items-center justify-center rounded-[2rem] shadow-xl sm:h-40 sm:w-40 ${
-                      darkMode
-                        ? "bg-gradient-to-br from-slate-800 to-slate-900 ring-1 ring-slate-600"
-                        : "bg-gradient-to-br from-white to-violet-50 ring-1 ring-violet-100"
-                    }`}
-                  >
-                    <div className="rounded-2xl bg-gradient-to-br from-sky-500 to-violet-600 p-[0.65rem] text-white shadow-md">
-                      <AudioWaveform className="h-14 w-14 sm:h-16 sm:w-16" strokeWidth={1.25} />
-                    </div>
-                  </div>
+                  <BrandLogo size="lg" />
                 </div>
               </div>
             </div>
-          </div>
+          </section>
 
-          <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:mt-8 lg:grid-cols-4 lg:gap-4">
-            <article className={`rounded-2xl border p-4 ${cardBg}`}>
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-violet-100 text-violet-600 dark:bg-violet-950/80 dark:text-violet-300">
-                <AudioWaveform className="h-5 w-5" />
-              </div>
-              <h3 className="mt-4 text-sm font-semibold text-slate-900 dark:text-slate-100">本机转写</h3>
-              <p className={`mt-1.5 text-xs leading-relaxed ${subtext}`}>语音先在本机识别</p>
-            </article>
-            <article className={`rounded-2xl border p-4 ${cardBg}`}>
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600 dark:bg-emerald-950/80 dark:text-emerald-300">
-                <Languages className="h-5 w-5" />
-              </div>
-              <h3 className="mt-4 text-sm font-semibold text-slate-900 dark:text-slate-100">语言方向</h3>
-              <p className={`mt-1.5 text-xs leading-relaxed ${subtext}`}>顶部随时切换</p>
-            </article>
-            <article className={`rounded-2xl border p-4 ${cardBg}`}>
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-amber-100 text-amber-600 dark:bg-amber-950/80 dark:text-amber-300">
-                <FileText className="h-5 w-5" />
-              </div>
-              <h3 className="mt-4 text-sm font-semibold text-slate-900 dark:text-slate-100">会话文本</h3>
-              <p className={`mt-1.5 text-xs leading-relaxed ${subtext}`}>原文和译文分区显示</p>
-            </article>
-            <article className={`rounded-2xl border p-4 ${cardBg}`}>
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-sky-100 text-sky-600 dark:bg-sky-950/80 dark:text-sky-300">
-                <Download className="h-5 w-5" />
-              </div>
-              <h3 className="mt-4 text-sm font-semibold text-slate-900 dark:text-slate-100">导出整理</h3>
-              <p className={`mt-1.5 text-xs leading-relaxed ${subtext}`}>保存为 Markdown</p>
-            </article>
-          </div>
+          <section className="mt-6 grid shrink-0 gap-3 sm:grid-cols-2 md:mt-8 md:grid-cols-4 md:gap-4">
+            {CAPABILITIES.map((item) => {
+              const Icon = item.icon;
+              return (
+                <article key={item.title} className={`rounded-2xl border p-4 ${cardBg}`}>
+                  <div className={`flex h-11 w-11 items-center justify-center rounded-xl ${item.tone}`}>
+                    <Icon className="h-5 w-5" />
+                  </div>
+                  <h3 className={`mt-4 text-sm font-semibold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>{item.title}</h3>
+                  <p className={`mt-1.5 text-xs leading-relaxed ${subtext}`}>{item.desc}</p>
+                </article>
+              );
+            })}
+          </section>
         </div>
-      </div>
+      </main>
     </div>
   );
 }

@@ -3,14 +3,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DEFAULT_LOCAL_API_ORIGIN, trimApiBase } from "../apiBase";
 
 const TARGET_SR = 16000;
-const CHUNK_SAMPLES = 12000;
+/** 参考实时转写类 API：16k/16bit/mono 约 40ms 一帧（640 samples / 1280 bytes）。 */
+const CHUNK_SAMPLES = 640;
 const LOWER = -0x8000;
 const UPPER = 0x7fff;
 /** 略提输入电平，便于离麦稍远时仍达到可用 SNR（硬限幅在 floatToI16）。 */
 const MIC_DIGITAL_GAIN = 1.55;
 
 type AsrMessage =
-  | { type: "transcript"; text: string }
+  | { type: "started"; action?: "started"; sid?: string; engine?: AsrMode; model?: string }
+  | {
+    type: "partial_transcript" | "final_transcript" | "transcript";
+    text: string;
+    segment_id?: number;
+    final?: boolean;
+    bg_ms?: number;
+    ed_ms?: number;
+  }
   | { type: "error"; message: string; detail?: string };
 
 const LOCAL_ASR_SETUP_MESSAGE =
@@ -89,7 +98,14 @@ async function connectAsrWebSocketFirstAvailable(
   throw last;
 }
 
-export type AsrMode = "faster_whisper" | "browser" | "none";
+export type AsrMode = "faster_whisper" | "parakeet" | "online_api" | "browser" | "none";
+
+export type TranscriptSegment = {
+  id: number;
+  text: string;
+  bgMs?: number;
+  edMs?: number;
+};
 
 function floatToI16(f: number): number {
   const s = Math.max(-1, Math.min(1, f * MIC_DIGITAL_GAIN));
@@ -189,12 +205,16 @@ export function useLiveAsr({ enabled, language, restartKey = 0 }: Options): {
   status: AsrStatus;
   errorMessage: string | null;
   transcript: string;
+  finalSegments: TranscriptSegment[];
+  latestFinalSegment: TranscriptSegment | null;
   asrMode: AsrMode;
   clearTranscript: () => void;
 } {
   const [status, setStatus] = useState<AsrStatus>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [transcript, setTranscript] = useState("");
+  const [finalSegments, setFinalSegments] = useState<TranscriptSegment[]>([]);
+  const [latestFinalSegment, setLatestFinalSegment] = useState<TranscriptSegment | null>(null);
   const [asrMode, setAsrMode] = useState<AsrMode>("none");
 
   const streamRef = useRef<MediaStream | null>(null);
@@ -206,13 +226,21 @@ export function useLiveAsr({ enabled, language, restartKey = 0 }: Options): {
   const recRef = useRef<RecLike | null>(null);
   /** 浏览器 STT：句末确定结果累加，避免识别会话重启后只保留最后一句。 */
   const browserFinalsRef = useRef("");
+  const asrCommittedSegmentsRef = useRef<string[]>([]);
+  const asrActiveSegmentRef = useRef<{ id: number; text: string } | null>(null);
+  const browserSegmentSeqRef = useRef(-1);
   /** 与 React 中 transcript 同步，便于恢复浏览器识别时接在已有内容后。 */
   const transcriptRef = useRef("");
   transcriptRef.current = transcript;
 
   const clearTranscript = useCallback(() => {
     setTranscript("");
+    setFinalSegments([]);
+    setLatestFinalSegment(null);
     browserFinalsRef.current = "";
+    asrCommittedSegmentsRef.current = [];
+    asrActiveSegmentRef.current = null;
+    browserSegmentSeqRef.current = -1;
   }, []);
 
   const clearChain = useCallback(() => {
@@ -253,6 +281,9 @@ export function useLiveAsr({ enabled, language, restartKey = 0 }: Options): {
     }
     if (wsRef.current) {
       try {
+        if (wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ end: true }));
+        }
         wsRef.current.close();
       } catch {
         /* ignore */
@@ -300,7 +331,18 @@ export function useLiveAsr({ enabled, language, restartKey = 0 }: Options): {
         for (let i = e.resultIndex; i < e.results.length; i += 1) {
           const r = e.results[i];
           if (r != null && r[0] != null && r.isFinal) {
-            browserFinalsRef.current += (r[0].transcript || "");
+            const finalText = (r[0].transcript || "").trim();
+            if (!finalText) continue;
+            browserFinalsRef.current = browserFinalsRef.current.trim()
+              ? `${browserFinalsRef.current.trim()} ${finalText}`
+              : finalText;
+            const seg: TranscriptSegment = {
+              id: browserSegmentSeqRef.current,
+              text: finalText,
+            };
+            browserSegmentSeqRef.current -= 1;
+            setFinalSegments((prev) => [...prev, seg]);
+            setLatestFinalSegment(seg);
           }
         }
         let interim = "";
@@ -360,7 +402,12 @@ export function useLiveAsr({ enabled, language, restartKey = 0 }: Options): {
     if (previousLanguageRef.current !== language) {
       previousLanguageRef.current = language;
       setTranscript("");
+      setFinalSegments([]);
+      setLatestFinalSegment(null);
       browserFinalsRef.current = "";
+      asrCommittedSegmentsRef.current = [];
+      asrActiveSegmentRef.current = null;
+      browserSegmentSeqRef.current = -1;
     }
   }, [language]);
 
@@ -412,14 +459,62 @@ export function useLiveAsr({ enabled, language, restartKey = 0 }: Options): {
 
       const cfg = { type: "config" as const, language };
       ws.send(JSON.stringify(cfg));
+      ws.send(JSON.stringify({ type: "audio_status", status: 0 }));
 
       ws.onmessage = (ev) => {
         try {
           const data: AsrMessage = JSON.parse(String(ev.data)) as AsrMessage;
-          if (data.type === "transcript" && data.text) {
+          if (data.type === "started") {
+            if (
+              data.engine === "parakeet"
+              || data.engine === "faster_whisper"
+              || data.engine === "online_api"
+            ) {
+              setAsrMode(data.engine);
+            }
+            return;
+          }
+          if (
+            (data.type === "partial_transcript"
+              || data.type === "final_transcript"
+              || data.type === "transcript")
+            && data.text
+          ) {
+            const t = data.text.trim();
+            if (!t) return;
+            const isFinal = data.type === "final_transcript" || data.final === true;
+            if (typeof data.segment_id === "number") {
+              if (isFinal) {
+                const current = asrActiveSegmentRef.current;
+                if (!current || current.id !== data.segment_id || current.text !== t) {
+                  asrActiveSegmentRef.current = { id: data.segment_id, text: t };
+                }
+                asrCommittedSegmentsRef.current.push(t);
+                asrActiveSegmentRef.current = null;
+                const seg: TranscriptSegment = {
+                  id: data.segment_id,
+                  text: t,
+                  bgMs: data.bg_ms,
+                  edMs: data.ed_ms,
+                };
+                setFinalSegments((prev) => {
+                  if (prev.some((item) => item.id === seg.id)) {
+                    return prev;
+                  }
+                  return [...prev, seg];
+                });
+                setLatestFinalSegment(seg);
+              } else {
+                asrActiveSegmentRef.current = { id: data.segment_id, text: t };
+              }
+              const parts = [...asrCommittedSegmentsRef.current];
+              if (asrActiveSegmentRef.current?.text) {
+                parts.push(asrActiveSegmentRef.current.text);
+              }
+              setTranscript(parts.join(" ").trim());
+              return;
+            }
             setTranscript((prev) => {
-              const t = data.text.trim();
-              if (!t) return prev;
               if (!prev) return t;
               const tail = prev.slice(-Math.min(40, prev.length));
               if (tail.includes(t) || prev.includes(t)) return prev;
@@ -474,6 +569,9 @@ export function useLiveAsr({ enabled, language, restartKey = 0 }: Options): {
       streamRef.current = stream;
       const ac = new AudioContext();
       ctxRef.current = ac;
+      if (ac.state === "suspended") {
+        await ac.resume();
+      }
       const source = ac.createMediaStreamSource(stream);
       const bufSize = 4096;
       const node = ac.createScriptProcessor(bufSize, 1, 1);
@@ -531,7 +629,15 @@ export function useLiveAsr({ enabled, language, restartKey = 0 }: Options): {
     };
   }, [enabled, language, restartKey, clearChain, startBrowserRecognition]);
 
-  return { status, errorMessage, transcript, asrMode, clearTranscript };
+  return {
+    status,
+    errorMessage,
+    transcript,
+    finalSegments,
+    latestFinalSegment,
+    asrMode,
+    clearTranscript,
+  };
 }
 
 function takeChunk(
